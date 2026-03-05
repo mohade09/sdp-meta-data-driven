@@ -1,0 +1,14 @@
+[project]
+name = "meta_driven_etl"
+version = "0.1.0"
+description = "Metadata-driven Spark Declarative Pipeline framework for bronze ingestion"
+dependencies = [
+    "pyyaml",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/meta_driven_etl"]

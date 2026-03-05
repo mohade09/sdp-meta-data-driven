@@ -1,0 +1,31 @@
+bundle:
+  name: meta_driven_etl
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: "Target Unity Catalog catalog"
+  schema:
+    description: "Target schema for bronze tables (default: bronze)"
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+      profile: fe-vm-vdm-classic-aerfvt
+    variables:
+      catalog: vdm_classic_aerfvt_catalog
+      schema: bronze_dev
+
+  prod:
+    mode: production
+    workspace:
+      host: https://fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+      profile: fe-vm-vdm-classic-aerfvt
+    variables:
+      catalog: vdm_classic_aerfvt_catalog
+      schema: bronze

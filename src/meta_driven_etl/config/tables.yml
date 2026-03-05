@@ -1,0 +1,225 @@
+# ============================================================================
+# META DATA DRIVEN INGESTION CONFIG
+# ============================================================================
+# Developers: Add new tables below to onboard new data sources.
+# No code changes required - just add a new table entry and deploy.
+#
+# Structure follows dbt-style conventions:
+#   - columns: schema definition with types and column-level tests
+#   - data_quality: table-level data quality rules (SDP expectations)
+#   - source: volume path, format, and reader options
+# ============================================================================
+
+version: 1
+
+defaults:
+  source_volume: "/Volumes/vdm_classic_aerfvt_catalog/dbdemos_ai_query/raw"
+  target_layer: bronze
+
+# ============================================================================
+# TABLE DEFINITIONS
+# ============================================================================
+# Each table entry generates a streaming table named bronze_meta_<table_name>
+# in the 'bronze' schema.
+#
+# Column tests (dbt-style):
+#   - not_null          : column must not be null
+#   - accepted_values   : column must be one of the listed values
+#   (note: 'unique' is not supported for streaming tables)
+#
+# Data quality actions:
+#   - warn : log the violation but keep the row (dp.expect)
+#   - drop : silently drop rows that violate the rule (dp.expect_or_drop)
+#   - fail : fail the pipeline if any row violates (dp.expect_or_fail)
+# ============================================================================
+
+tables:
+
+  # --------------------------------------------------------------------------
+  # CUSTOMERS TABLE
+  # --------------------------------------------------------------------------
+  customers:
+    description: "Customer master data from CRM system"
+
+    source:
+      path: "customers/"          # relative to defaults.source_volume
+      format: csv
+      options:
+        header: "true"
+        delimiter: ","
+        mode: "PERMISSIVE"
+
+    columns:
+      - name: customer_id
+        type: STRING
+        description: "Unique customer identifier"
+        tests:
+          - not_null
+
+      - name: first_name
+        type: STRING
+        description: "Customer first name"
+        tests:
+          - not_null
+
+      - name: last_name
+        type: STRING
+        description: "Customer last name"
+
+      - name: email
+        type: STRING
+        description: "Customer email address"
+        tests:
+          - not_null
+
+      - name: phone
+        type: STRING
+        description: "Contact phone number"
+
+      - name: address
+        type: STRING
+        description: "Street address"
+
+      - name: city
+        type: STRING
+        description: "City"
+
+      - name: state
+        type: STRING
+        description: "State/Province code"
+
+      - name: zip_code
+        type: STRING
+        description: "ZIP/Postal code"
+
+      - name: country
+        type: STRING
+        description: "Country code"
+        tests:
+          - not_null
+
+      - name: signup_date
+        type: DATE
+        description: "Date the customer signed up"
+        tests:
+          - not_null
+
+      - name: loyalty_tier
+        type: STRING
+        description: "Loyalty program tier"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["Bronze", "Silver", "Gold", "Platinum"]
+
+    cluster_by:
+      - signup_date
+
+    data_quality:
+      - name: valid_email_format
+        expression: "email LIKE '%@%.%'"
+        action: drop
+        description: "Email must contain @ and a domain"
+
+      - name: valid_zip_length
+        expression: "LENGTH(zip_code) = 5"
+        action: warn
+        description: "ZIP code should be 5 characters"
+
+      - name: valid_signup_date
+        expression: "signup_date <= current_date()"
+        action: fail
+        description: "Signup date cannot be in the future"
+
+  # --------------------------------------------------------------------------
+  # ORDERS TABLE
+  # --------------------------------------------------------------------------
+  orders:
+    description: "Order transactions from e-commerce platform"
+
+    source:
+      path: "orders/"
+      format: csv
+      options:
+        header: "true"
+        delimiter: ","
+        mode: "PERMISSIVE"
+
+    columns:
+      - name: order_id
+        type: STRING
+        description: "Unique order identifier"
+        tests:
+          - not_null
+
+      - name: customer_id
+        type: STRING
+        description: "Reference to customers table"
+        tests:
+          - not_null
+
+      - name: order_date
+        type: DATE
+        description: "Date of the order"
+        tests:
+          - not_null
+
+      - name: status
+        type: STRING
+        description: "Order status"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["completed", "pending", "cancelled", "refunded", "shipped"]
+
+      - name: total_amount
+        type: "DECIMAL(10,2)"
+        description: "Total order amount"
+
+      - name: discount_amount
+        type: "DECIMAL(10,2)"
+        description: "Discount applied"
+
+      - name: shipping_amount
+        type: "DECIMAL(10,2)"
+        description: "Shipping cost"
+
+      - name: payment_method
+        type: STRING
+        description: "Payment method used"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["credit_card", "debit_card", "paypal", "bank_transfer", "cash"]
+
+      - name: shipping_address
+        type: STRING
+        description: "Full shipping address"
+
+      - name: items_count
+        type: INT
+        description: "Number of items in the order"
+
+    cluster_by:
+      - order_date
+
+    data_quality:
+      - name: positive_total_amount
+        expression: "total_amount > 0"
+        action: drop
+        description: "Total amount must be positive"
+
+      - name: discount_not_exceeds_total
+        expression: "discount_amount <= total_amount"
+        action: warn
+        description: "Discount should not exceed total amount"
+
+      - name: non_negative_shipping
+        expression: "shipping_amount >= 0"
+        action: warn
+        description: "Shipping amount cannot be negative"
+
+      - name: valid_items_count
+        expression: "items_count > 0"
+        action: drop
+        description: "Order must have at least one item"

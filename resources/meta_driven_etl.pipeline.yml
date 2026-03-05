@@ -1,0 +1,15 @@
+resources:
+  pipelines:
+    meta_driven_etl:
+      name: meta_driven_etl
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      serverless: true
+      configuration:
+        config_base_path: ${workspace.file_path}/src/meta_driven_etl/config
+      libraries:
+        - glob:
+            include: ../src/meta_driven_etl/pipeline/**
+      environment:
+        dependencies:
+          - --editable ${workspace.file_path}
