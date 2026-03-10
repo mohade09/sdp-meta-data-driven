@@ -1,0 +1,284 @@
+
+# ============================================================================
+# META DATA DRIVEN SILVER LAYER CONFIG
+# ============================================================================
+# Developers: Add new silver tables below for cleaned/conformed data.
+# No code changes required - just add a new table entry and deploy.
+#
+# Silver layer reads from bronze streaming tables and applies:
+#   - deduplication (row_number windowing)
+#   - column transformations (casting, renaming, derivations)
+#   - filtering (removing bad/unwanted records)
+#   - joins across bronze tables
+#   - SCD Type 1 / Type 2 change tracking via apply_changes
+#
+# Data quality rules follow the same convention as bronze.
+# ============================================================================
+
+version: 1
+
+defaults:
+  source_catalog: "vdm_classic_aerfvt_catalog"
+  source_schema: "bronze"
+  target_layer: silver
+
+# ============================================================================
+# TABLE DEFINITIONS
+# ============================================================================
+# Each table entry generates a streaming table named silver_meta_<table_name>
+# in the 'silver' schema.
+#
+# Transformation types:
+#   - deduplicate   : keep latest row per partition key(s)
+#   - filter        : SQL WHERE condition to remove rows
+#   - derive        : add computed columns from SQL expressions
+#   - rename        : rename columns (old_name -> new_name)
+#   - drop_columns  : remove columns from output
+#   - cast          : change column data types
+#
+# SCD (Slowly Changing Dimensions):
+#   scd.type: 1 or 2
+#     - SCD1: overwrites existing row (no history)
+#     - SCD2: creates new row version, auto-manages __START_AT,
+#             __END_AT, __IS_CURRENT columns
+#   scd.keys: business key column(s) for matching
+#   scd.sequence_by: column to determine ordering (e.g. _ingested_at)
+#   scd.track_history_columns: (SCD2 only) columns that trigger a new
+#       version when changed. If omitted, all non-key columns are tracked.
+#   scd.except_columns: (SCD2 only) columns to exclude from tracking.
+#       Mutually exclusive with track_history_columns.
+#   scd.ignore_null_updates: (optional, default false) if true, null values
+#       in incoming data will not overwrite existing non-null values.
+#
+# When scd is specified, the table uses dp.create_streaming_table() +
+# dp.apply_changes() instead of dp.table() with a return DataFrame.
+# Transformations are applied to the source stream BEFORE apply_changes.
+# ============================================================================
+
+tables:
+
+  # --------------------------------------------------------------------------
+  # CLEAN CUSTOMERS (SCD Type 2 — track dimension changes)
+  # --------------------------------------------------------------------------
+  clean_customers:
+    description: "Customer dimension with SCD2 history tracking"
+
+    source:
+      table: "bronze_meta_customers"    # reads from bronze streaming table
+
+    scd:
+      type: 2
+      keys:
+        - customer_id
+      sequence_by: "_ingested_at"
+      track_history_columns:
+        - email
+        - phone
+        - address
+        - city
+        - state
+        - zip_code
+        - country
+        - loyalty_tier
+      ignore_null_updates: true
+
+    transformations:
+      - type: derive
+        columns:
+          - name: full_name
+            expression: "CONCAT(first_name, ' ', last_name)"
+            type: STRING
+          - name: signup_year
+            expression: "YEAR(signup_date)"
+            type: INT
+
+      - type: drop_columns
+        columns:
+          - _source_file
+
+    columns:
+      - name: customer_id
+        type: STRING
+        description: "Unique customer identifier"
+        tests:
+          - not_null
+
+      - name: first_name
+        type: STRING
+        description: "Customer first name"
+
+      - name: last_name
+        type: STRING
+        description: "Customer last name"
+
+      - name: email
+        type: STRING
+        description: "Customer email address"
+        tests:
+          - not_null
+
+      - name: phone
+        type: STRING
+        description: "Contact phone number"
+
+      - name: city
+        type: STRING
+        description: "City"
+
+      - name: state
+        type: STRING
+        description: "State/Province code"
+
+      - name: zip_code
+        type: STRING
+        description: "ZIP/Postal code"
+
+      - name: country
+        type: STRING
+        description: "Country code"
+        tests:
+          - not_null
+
+      - name: signup_date
+        type: DATE
+        description: "Date the customer signed up"
+
+      - name: loyalty_tier
+        type: STRING
+        description: "Loyalty program tier"
+        tests:
+          - accepted_values:
+              values: ["Bronze", "Silver", "Gold", "Platinum"]
+
+      - name: full_name
+        type: STRING
+        description: "Derived full name"
+
+      - name: signup_year
+        type: INT
+        description: "Year extracted from signup_date"
+
+    cluster_by:
+      - country
+      - signup_year
+
+    data_quality:
+      - name: valid_email_format
+        expression: "email LIKE '%@%.%'"
+        action: drop
+        description: "Email must contain @ and a domain"
+
+      - name: valid_country_code
+        expression: "LENGTH(country) BETWEEN 2 AND 3"
+        action: warn
+        description: "Country code should be 2-3 characters"
+
+  # --------------------------------------------------------------------------
+  # CLEAN ORDERS (SCD Type 1 — overwrite on status/amount changes)
+  # --------------------------------------------------------------------------
+  clean_orders:
+    description: "Deduplicated order data with SCD1 overwrite semantics"
+
+    source:
+      table: "bronze_meta_orders"
+
+    scd:
+      type: 1
+      keys:
+        - order_id
+      sequence_by: "_ingested_at"
+      ignore_null_updates: false
+
+    transformations:
+      - type: derive
+        columns:
+          - name: net_amount
+            expression: "total_amount - COALESCE(discount_amount, 0)"
+            type: "DECIMAL(10,2)"
+          - name: order_year
+            expression: "YEAR(order_date)"
+            type: INT
+          - name: order_month
+            expression: "MONTH(order_date)"
+            type: INT
+
+      - type: filter
+        condition: "status != 'cancelled'"
+
+      - type: drop_columns
+        columns:
+          - _source_file
+          - shipping_address
+
+    columns:
+      - name: order_id
+        type: STRING
+        description: "Unique order identifier"
+        tests:
+          - not_null
+
+      - name: customer_id
+        type: STRING
+        description: "Reference to customers table"
+        tests:
+          - not_null
+
+      - name: order_date
+        type: DATE
+        description: "Date of the order"
+        tests:
+          - not_null
+
+      - name: status
+        type: STRING
+        description: "Order status"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["completed", "pending", "refunded", "shipped"]
+
+      - name: total_amount
+        type: "DECIMAL(10,2)"
+        description: "Total order amount"
+
+      - name: discount_amount
+        type: "DECIMAL(10,2)"
+        description: "Discount applied"
+
+      - name: shipping_amount
+        type: "DECIMAL(10,2)"
+        description: "Shipping cost"
+
+      - name: payment_method
+        type: STRING
+        description: "Payment method used"
+
+      - name: items_count
+        type: INT
+        description: "Number of items in the order"
+
+      - name: net_amount
+        type: "DECIMAL(10,2)"
+        description: "Total minus discount"
+
+      - name: order_year
+        type: INT
+        description: "Year extracted from order_date"
+
+      - name: order_month
+        type: INT
+        description: "Month extracted from order_date"
+
+    cluster_by:
+      - order_date
+
+    data_quality:
+      - name: positive_net_amount
+        expression: "net_amount > 0"
+        action: drop
+        description: "Net amount must be positive"
+
+      - name: valid_items_count
+        expression: "items_count > 0"
+        action: warn
+        description: "Order must have at least one item"

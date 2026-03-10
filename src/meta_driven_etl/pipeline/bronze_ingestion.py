@@ -131,7 +131,7 @@ def _apply_expectation(fn, name: str, expression: str, action: str):
 # ---------------------------------------------------------------------------
 # __file__ is not defined in SDP runtime; use pipeline parameter instead
 _config_base = spark.conf.get("config_base_path")  # noqa: F821
-_config_path = os.path.join(_config_base, "tables.yml")
+_config_path = os.path.join(_config_base, "bronze_tables.yml")
 with open(_config_path, "r") as _f:
     _config = yaml.safe_load(_f)
 

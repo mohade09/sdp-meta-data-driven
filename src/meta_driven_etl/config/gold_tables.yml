@@ -1,0 +1,302 @@
+# ============================================================================
+# META DATA DRIVEN GOLD LAYER CONFIG
+# ============================================================================
+# Developers: Add new gold tables below for business-level aggregations.
+# No code changes required - just add a new table entry and deploy.
+#
+# Gold layer reads from silver tables and produces:
+#   - Aggregated metrics and KPIs
+#   - Joined/denormalized business views
+#   - Dimension tables for BI consumption
+#
+# Output options:
+#   materialized_view: true  → dp.materialized_view() — auto-refreshes when
+#                              upstream data changes, optimized for reads
+#   materialized_view: false → dp.table() — standard batch table
+#
+# Default is materialized_view: true (recommended for gold layer).
+# ============================================================================
+
+version: 1
+
+defaults:
+  source_catalog: "vdm_classic_aerfvt_catalog"
+  source_schema: "silver"
+  target_layer: gold
+  materialized_view: true          # default for all gold tables
+
+# ============================================================================
+# TABLE DEFINITIONS
+# ============================================================================
+# Each entry generates either:
+#   - A materialized view: gold_meta_<table_name>  (materialized_view: true)
+#   - A standard table:    gold_meta_<table_name>  (materialized_view: false)
+#
+# Table types:
+#   - aggregate  : GROUP BY with metric expressions + optional joins
+#   - sql        : raw SQL query for full flexibility — write any SELECT
+#                  statement directly. Use for complex CTEs, window functions,
+#                  UNION, PIVOT, or anything the aggregate builder can't express.
+#
+# Aggregation metrics:
+#   - name       : output column name
+#   - expression : SQL aggregate expression (COUNT, SUM, AVG, etc.)
+#
+# SQL mode:
+#   sql: |
+#     SELECT ...
+#     FROM silver_meta_clean_orders
+#     WHERE ...
+#   (multi-line SQL using YAML block scalar)
+# ============================================================================
+
+tables:
+
+  # --------------------------------------------------------------------------
+  # CUSTOMER ORDER SUMMARY (MV — auto-refreshes)
+  # --------------------------------------------------------------------------
+  customer_order_summary:
+    description: "Per-customer order metrics for BI dashboards"
+    table_type: aggregate
+    materialized_view: true
+
+    source:
+      primary_table: "silver_meta_clean_orders"
+      joins:
+        - table: "silver_meta_clean_customers"
+          alias: "c"
+          type: inner
+          condition: "orders.customer_id = c.customer_id"
+
+    group_by:
+      - "orders.customer_id"
+      - "c.full_name"
+      - "c.email"
+      - "c.country"
+      - "c.loyalty_tier"
+
+    metrics:
+      - name: total_orders
+        expression: "COUNT(orders.order_id)"
+        type: BIGINT
+        description: "Total number of orders"
+
+      - name: total_spend
+        expression: "SUM(orders.total_amount)"
+        type: "DECIMAL(18,2)"
+        description: "Total spend across all orders"
+
+      - name: total_discount
+        expression: "SUM(orders.discount_amount)"
+        type: "DECIMAL(18,2)"
+        description: "Total discount received"
+
+      - name: avg_order_value
+        expression: "ROUND(AVG(orders.net_amount), 2)"
+        type: "DECIMAL(10,2)"
+        description: "Average order value (net)"
+
+      - name: total_items
+        expression: "SUM(orders.items_count)"
+        type: BIGINT
+        description: "Total items purchased"
+
+      - name: first_order_date
+        expression: "MIN(orders.order_date)"
+        type: DATE
+        description: "Date of first order"
+
+      - name: last_order_date
+        expression: "MAX(orders.order_date)"
+        type: DATE
+        description: "Date of most recent order"
+
+    data_quality:
+      - name: valid_total_orders
+        expression: "total_orders > 0"
+        action: warn
+        description: "Customer should have at least one order"
+
+      - name: spend_matches_orders
+        expression: "total_spend >= 0"
+        action: warn
+        description: "Total spend should be non-negative"
+
+  # --------------------------------------------------------------------------
+  # MONTHLY REVENUE (MV — auto-refreshes)
+  # --------------------------------------------------------------------------
+  monthly_revenue:
+    description: "Monthly revenue and order metrics"
+    table_type: aggregate
+    materialized_view: true
+
+    source:
+      primary_table: "silver_meta_clean_orders"
+
+    group_by:
+      - "order_year"
+      - "order_month"
+
+    metrics:
+      - name: total_revenue
+        expression: "SUM(total_amount)"
+        type: "DECIMAL(18,2)"
+        description: "Total revenue for the month"
+
+      - name: total_net_revenue
+        expression: "SUM(net_amount)"
+        type: "DECIMAL(18,2)"
+        description: "Revenue after discounts"
+
+      - name: total_orders
+        expression: "COUNT(order_id)"
+        type: BIGINT
+        description: "Number of orders"
+
+      - name: avg_order_value
+        expression: "ROUND(AVG(net_amount), 2)"
+        type: "DECIMAL(10,2)"
+        description: "Average order value"
+
+      - name: total_shipping
+        expression: "SUM(shipping_amount)"
+        type: "DECIMAL(18,2)"
+        description: "Total shipping charges"
+
+      - name: total_discounts
+        expression: "SUM(discount_amount)"
+        type: "DECIMAL(18,2)"
+        description: "Total discounts given"
+
+    data_quality:
+      - name: positive_revenue
+        expression: "total_revenue > 0"
+        action: warn
+        description: "Monthly revenue should be positive"
+
+  # --------------------------------------------------------------------------
+  # LOYALTY TIER ANALYSIS (standard table — not MV)
+  # --------------------------------------------------------------------------
+  loyalty_tier_analysis:
+    description: "Aggregated metrics by customer loyalty tier"
+    table_type: aggregate
+    materialized_view: false
+
+    source:
+      primary_table: "silver_meta_clean_orders"
+      joins:
+        - table: "silver_meta_clean_customers"
+          alias: "c"
+          type: inner
+          condition: "orders.customer_id = c.customer_id"
+
+    group_by:
+      - "c.loyalty_tier"
+
+    metrics:
+      - name: customer_count
+        expression: "COUNT(DISTINCT orders.customer_id)"
+        type: BIGINT
+        description: "Number of customers in tier"
+
+      - name: total_revenue
+        expression: "SUM(orders.total_amount)"
+        type: "DECIMAL(18,2)"
+        description: "Total revenue from tier"
+
+      - name: avg_spend_per_customer
+        expression: "ROUND(SUM(orders.total_amount) / COUNT(DISTINCT orders.customer_id), 2)"
+        type: "DECIMAL(10,2)"
+        description: "Average spend per customer in tier"
+
+      - name: total_orders
+        expression: "COUNT(orders.order_id)"
+        type: BIGINT
+        description: "Total orders from tier"
+
+      - name: avg_order_value
+        expression: "ROUND(AVG(orders.net_amount), 2)"
+        type: "DECIMAL(10,2)"
+        description: "Average order value for tier"
+
+    data_quality:
+      - name: valid_customer_count
+        expression: "customer_count > 0"
+        action: warn
+        description: "Each tier should have at least one customer"
+
+  # --------------------------------------------------------------------------
+  # HIGH VALUE CUSTOMERS (sql — full SQL flexibility)
+  # --------------------------------------------------------------------------
+  high_value_customers:
+    description: "Top customers by lifetime spend with ranking and segments"
+    table_type: sql
+    materialized_view: true
+
+    sql: |
+      WITH customer_metrics AS (
+        SELECT
+          o.customer_id,
+          c.full_name,
+          c.email,
+          c.country,
+          c.loyalty_tier,
+          COUNT(o.order_id)            AS total_orders,
+          SUM(o.net_amount)            AS lifetime_spend,
+          AVG(o.net_amount)            AS avg_order_value,
+          MIN(o.order_date)            AS first_order_date,
+          MAX(o.order_date)            AS last_order_date,
+          DATEDIFF(MAX(o.order_date), MIN(o.order_date)) AS customer_tenure_days
+        FROM silver_meta_clean_orders o
+        INNER JOIN silver_meta_clean_customers c
+          ON o.customer_id = c.customer_id
+        GROUP BY o.customer_id, c.full_name, c.email, c.country, c.loyalty_tier
+      )
+      SELECT
+        *,
+        RANK() OVER (ORDER BY lifetime_spend DESC) AS spend_rank,
+        NTILE(4) OVER (ORDER BY lifetime_spend DESC) AS spend_quartile,
+        CASE
+          WHEN lifetime_spend >= 10000 THEN 'VIP'
+          WHEN lifetime_spend >= 5000  THEN 'High'
+          WHEN lifetime_spend >= 1000  THEN 'Medium'
+          ELSE 'Low'
+        END AS value_segment
+      FROM customer_metrics
+
+    data_quality:
+      - name: valid_lifetime_spend
+        expression: "lifetime_spend > 0"
+        action: warn
+        description: "Lifetime spend should be positive"
+
+      - name: valid_tenure
+        expression: "customer_tenure_days >= 0"
+        action: warn
+        description: "Tenure days should be non-negative"
+
+  # --------------------------------------------------------------------------
+  # PAYMENT METHOD ANALYSIS (sql — PIVOT example)
+  # --------------------------------------------------------------------------
+  payment_method_revenue:
+    description: "Monthly revenue pivoted by payment method"
+    table_type: sql
+    materialized_view: false
+
+    sql: |
+      SELECT
+        order_year,
+        order_month,
+        payment_method,
+        COUNT(order_id)       AS order_count,
+        SUM(net_amount)       AS total_revenue,
+        AVG(net_amount)       AS avg_order_value,
+        SUM(shipping_amount)  AS total_shipping
+      FROM silver_meta_clean_orders
+      GROUP BY order_year, order_month, payment_method
+
+    data_quality:
+      - name: positive_revenue
+        expression: "total_revenue > 0"
+        action: warn
+        description: "Revenue per payment method should be positive"
