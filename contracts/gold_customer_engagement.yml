@@ -1,0 +1,227 @@
+# ============================================================================
+# DATA CONTRACT — Open Data Contract Standard (ODCS) v3.0.1
+# ============================================================================
+# Gold-layer table: gold_meta_customer_engagement
+#
+# Source of truth: src/meta_driven_etl/config/gold_tables.yml
+#   (table: customer_engagement, table_type: sql). Produced as a Databricks
+#   materialized view by gold_aggregation.py.
+#
+# NOTE: Defined via raw SQL (CTE + ratio calcs). Physical types below are
+# INFERRED from the SQL expressions — verify against the deployed table
+# (DESCRIBE) and adjust. Keep in sync with gold_tables.yml.
+# ============================================================================
+
+apiVersion: v3.0.1
+kind: DataContract
+id: gold-customer-engagement
+name: Customer Engagement
+version: 1.0.0
+status: active
+domain: product
+dataProduct: engagement-analytics
+tenant: vdm_classic_aerfvt
+
+description:
+  purpose: >-
+    Customer engagement funnel with session and conversion metrics. One row
+    per customer_id with event counts by type and derived funnel rates.
+  usage: >-
+    Read-only analytical consumption for engagement/funnel dashboards.
+  limitations: >-
+    Materialized view reflecting upstream silver state at last refresh.
+    Only customers with at least one event appear (INNER join on events).
+
+servers:
+  - server: prod
+    type: databricks
+    environment: production
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold
+    format: delta
+  - server: dev
+    type: databricks
+    environment: development
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold_dev
+    format: delta
+
+schema:
+  - name: gold_meta_customer_engagement
+    physicalName: gold_meta_customer_engagement
+    physicalType: materialized_view
+    logicalType: object
+    description: Customer engagement funnel with session and conversion metrics.
+    businessName: Customer Engagement
+    dataGranularityDescription: One row per customer_id.
+    properties:
+
+      - name: customer_id
+        businessName: Customer ID
+        logicalType: string
+        physicalType: STRING
+        description: Unique customer identifier. Grain of this table.
+        primaryKey: true
+        required: true
+        unique: true
+        classification: internal
+
+      - name: full_name
+        businessName: Customer Full Name
+        logicalType: string
+        physicalType: STRING
+        description: Customer full name.
+        classification: pii
+
+      - name: loyalty_tier
+        businessName: Loyalty Tier
+        logicalType: string
+        physicalType: STRING
+        description: Customer loyalty tier.
+        classification: internal
+
+      - name: total_sessions
+        businessName: Total Sessions
+        logicalType: integer
+        physicalType: BIGINT
+        description: Distinct sessions (COUNT DISTINCT session_id).
+        required: true
+
+      - name: total_events
+        businessName: Total Events
+        logicalType: integer
+        physicalType: BIGINT
+        description: Total events (COUNT of event_id).
+        required: true
+
+      - name: page_views
+        businessName: Page Views
+        logicalType: integer
+        physicalType: BIGINT
+        description: Count of page_view events.
+        required: true
+
+      - name: add_to_carts
+        businessName: Add-to-Cart Events
+        logicalType: integer
+        physicalType: BIGINT
+        description: Count of add_to_cart events.
+        required: true
+
+      - name: purchases
+        businessName: Purchases
+        logicalType: integer
+        physicalType: BIGINT
+        description: Count of purchase events.
+        required: true
+
+      - name: searches
+        businessName: Searches
+        logicalType: integer
+        physicalType: BIGINT
+        description: Count of search events.
+        required: true
+
+      - name: first_event_at
+        businessName: First Event At
+        logicalType: date
+        physicalType: TIMESTAMP
+        description: Timestamp of the customer's first event.
+
+      - name: last_event_at
+        businessName: Last Event At
+        logicalType: date
+        physicalType: TIMESTAMP
+        description: Timestamp of the customer's most recent event.
+
+      - name: session_conversion_rate
+        businessName: Session Conversion Rate
+        logicalType: number
+        physicalType: DOUBLE
+        description: purchases / total_sessions, rounded to 4 decimals. Nullable.
+        required: false
+        quality:
+          - rule: sql
+            query: session_conversion_rate IS NULL OR session_conversion_rate BETWEEN 0 AND 1
+            severity: warning
+            description: Conversion rate should be between 0 and 1.
+
+      - name: browse_to_cart_rate
+        businessName: Browse-to-Cart Rate
+        logicalType: number
+        physicalType: DOUBLE
+        description: add_to_carts / page_views, rounded to 4 decimals. Nullable.
+        required: false
+
+      - name: cart_to_purchase_rate
+        businessName: Cart-to-Purchase Rate
+        logicalType: number
+        physicalType: DOUBLE
+        description: purchases / add_to_carts, rounded to 4 decimals. Nullable.
+        required: false
+
+      - name: avg_events_per_session
+        businessName: Avg Events per Session
+        logicalType: number
+        physicalType: DOUBLE
+        description: total_events / total_sessions, rounded to 2 decimals.
+        required: false
+
+quality:
+  - name: valid_total_sessions
+    rule: sql
+    query: total_sessions > 0
+    severity: warning
+    description: Customer should have at least one session.
+  - name: valid_conversion_rate
+    rule: sql
+    query: session_conversion_rate IS NULL OR session_conversion_rate BETWEEN 0 AND 1
+    severity: warning
+    description: Conversion rate should be between 0 and 1.
+  - name: unique_customer_grain
+    rule: uniqueness
+    dimension: customer_id
+    severity: error
+    description: customer_id must be unique — it is the grain.
+
+lineage:
+  sources:
+    - name: silver_meta_clean_events
+      catalog: vdm_classic_aerfvt_catalog
+      schema: silver
+      relationship: primary
+      description: Event fact source; aggregated per customer_id.
+    - name: silver_meta_clean_customers
+      catalog: vdm_classic_aerfvt_catalog
+      schema: silver
+      relationship: inner_join
+      joinCondition: events.customer_id = customers.customer_id
+      description: Customer dimension providing full_name and loyalty_tier.
+  transformation: >-
+    CTE aggregates events JOIN customers by customer_id (with per-event-type
+    counts), then derives funnel rate columns with NULLIF-guarded division.
+
+slaProperties:
+  - property: refreshFrequency
+    value: on-upstream-change
+    description: Materialized view auto-refreshes on upstream change.
+  - property: retention
+    value: unlimited
+    description: Delta-backed; retention governed by catalog defaults.
+
+team:
+  - role: owner
+    description: Data Engineering — meta_driven_etl pipeline owner.
+support:
+  - channel: '#data-engineering'
+    tool: slack
+    scope: interactive
+
+tags:
+  - gold
+  - product
+  - engagement
+  - funnel
+  - materialized-view

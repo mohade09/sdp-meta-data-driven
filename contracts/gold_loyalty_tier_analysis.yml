@@ -1,0 +1,156 @@
+# ============================================================================
+# DATA CONTRACT — Open Data Contract Standard (ODCS) v3.0.1
+# ============================================================================
+# Gold-layer table: gold_meta_loyalty_tier_analysis
+#
+# Source of truth: src/meta_driven_etl/config/gold_tables.yml
+#   (table: loyalty_tier_analysis). Physical object is a STANDARD Delta table
+#   (materialized_view: false), produced by gold_aggregation.py.
+# Keep in sync with gold_tables.yml; bump `version` on any schema change.
+# ============================================================================
+
+apiVersion: v3.0.1
+kind: DataContract
+id: gold-loyalty-tier-analysis
+name: Loyalty Tier Analysis
+version: 1.0.0
+status: active
+domain: sales
+dataProduct: customer-analytics
+tenant: vdm_classic_aerfvt
+
+description:
+  purpose: >-
+    Aggregated metrics by customer loyalty tier. One row per loyalty_tier with
+    customer counts, revenue, and per-customer/per-order averages.
+  usage: >-
+    Read-only analytical consumption for loyalty program dashboards.
+  limitations: >-
+    Standard batch table (not a materialized view); recomputed on pipeline run.
+    Tiers with zero matching orders are absent (INNER join on orders).
+
+servers:
+  - server: prod
+    type: databricks
+    environment: production
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold
+    format: delta
+  - server: dev
+    type: databricks
+    environment: development
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold_dev
+    format: delta
+
+schema:
+  - name: gold_meta_loyalty_tier_analysis
+    physicalName: gold_meta_loyalty_tier_analysis
+    physicalType: table
+    logicalType: object
+    description: Aggregated metrics by customer loyalty tier.
+    businessName: Loyalty Tier Analysis
+    dataGranularityDescription: One row per loyalty_tier.
+    properties:
+
+      - name: loyalty_tier
+        businessName: Loyalty Tier
+        logicalType: string
+        physicalType: STRING
+        description: Customer loyalty tier. Grain of this table.
+        primaryKey: true
+        required: true
+        unique: true
+        classification: internal
+
+      - name: customer_count
+        businessName: Customer Count
+        logicalType: integer
+        physicalType: BIGINT
+        description: Number of distinct customers in the tier.
+        required: true
+        quality:
+          - rule: minValue
+            mustBeGreaterThan: 0
+            severity: warning
+            description: Each tier should have at least one customer.
+
+      - name: total_revenue
+        businessName: Total Revenue
+        logicalType: number
+        physicalType: DECIMAL(18,2)
+        description: Total revenue from the tier (SUM of total_amount).
+        required: true
+
+      - name: avg_spend_per_customer
+        businessName: Average Spend per Customer
+        logicalType: number
+        physicalType: DECIMAL(10,2)
+        description: Total revenue divided by distinct customers, rounded to 2.
+        required: true
+
+      - name: total_orders
+        businessName: Total Orders
+        logicalType: integer
+        physicalType: BIGINT
+        description: Total orders from the tier.
+        required: true
+
+      - name: avg_order_value
+        businessName: Average Order Value
+        logicalType: number
+        physicalType: DECIMAL(10,2)
+        description: Average net order value for the tier, rounded to 2.
+        required: true
+
+quality:
+  - name: valid_customer_count
+    rule: sql
+    query: customer_count > 0
+    severity: warning
+    description: Each tier should have at least one customer.
+  - name: unique_tier_grain
+    rule: uniqueness
+    dimension: loyalty_tier
+    severity: error
+    description: loyalty_tier must be unique — it is the grain.
+
+lineage:
+  sources:
+    - name: silver_meta_clean_orders
+      catalog: vdm_classic_aerfvt_catalog
+      schema: silver
+      relationship: primary
+      description: Order fact source; aggregated by loyalty tier.
+    - name: silver_meta_clean_customers
+      catalog: vdm_classic_aerfvt_catalog
+      schema: silver
+      relationship: inner_join
+      joinCondition: orders.customer_id = customers.customer_id
+      description: Customer dimension providing loyalty_tier.
+  transformation: >-
+    INNER JOIN orders with customers on customer_id, GROUP BY loyalty_tier.
+
+slaProperties:
+  - property: refreshFrequency
+    value: on-pipeline-run
+    description: Standard table; recomputed each pipeline execution.
+  - property: retention
+    value: unlimited
+    description: Delta-backed; retention governed by catalog defaults.
+
+team:
+  - role: owner
+    description: Data Engineering — meta_driven_etl pipeline owner.
+support:
+  - channel: '#data-engineering'
+    tool: slack
+    scope: interactive
+
+tags:
+  - gold
+  - customer
+  - loyalty
+  - table
