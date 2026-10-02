@@ -1,0 +1,232 @@
+# ============================================================================
+# DATA CONTRACT — Open Data Contract Standard (ODCS) v3.0.1
+# ============================================================================
+# Gold-layer table: gold_meta_high_value_customers
+#
+# Source of truth: src/meta_driven_etl/config/gold_tables.yml
+#   (table: high_value_customers, table_type: sql). Produced as a Databricks
+#   materialized view by gold_aggregation.py.
+#
+# NOTE: This table is defined via raw SQL (CTE + window functions). Physical
+# types below are INFERRED from the SQL expressions. Verify against the
+# deployed table schema (DESCRIBE) and adjust if Spark resolves them
+# differently. Keep in sync with gold_tables.yml; bump `version` on change.
+# ============================================================================
+
+apiVersion: v3.0.1
+kind: DataContract
+id: gold-high-value-customers
+name: High Value Customers
+version: 1.0.0
+status: active
+domain: sales
+dataProduct: customer-analytics
+tenant: vdm_classic_aerfvt
+
+description:
+  purpose: >-
+    Top customers by lifetime spend, with rank, spend quartile, and value
+    segment. One row per customer_id.
+  usage: >-
+    Read-only analytical consumption for customer segmentation and targeting.
+  limitations: >-
+    Materialized view reflecting upstream silver state at last refresh.
+    Only customers with at least one order appear (INNER join on orders).
+
+servers:
+  - server: prod
+    type: databricks
+    environment: production
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold
+    format: delta
+  - server: dev
+    type: databricks
+    environment: development
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold_dev
+    format: delta
+
+schema:
+  - name: gold_meta_high_value_customers
+    physicalName: gold_meta_high_value_customers
+    physicalType: materialized_view
+    logicalType: object
+    description: Top customers by lifetime spend with ranking and segments.
+    businessName: High Value Customers
+    dataGranularityDescription: One row per customer_id.
+    properties:
+
+      - name: customer_id
+        businessName: Customer ID
+        logicalType: string
+        physicalType: STRING
+        description: Unique customer identifier. Grain of this table.
+        primaryKey: true
+        required: true
+        unique: true
+        classification: internal
+
+      - name: full_name
+        businessName: Customer Full Name
+        logicalType: string
+        physicalType: STRING
+        description: Customer full name.
+        classification: pii
+
+      - name: email
+        businessName: Email Address
+        logicalType: string
+        physicalType: STRING
+        description: Customer email address.
+        classification: pii
+
+      - name: country
+        businessName: Country
+        logicalType: string
+        physicalType: STRING
+        description: Customer country.
+        classification: internal
+
+      - name: loyalty_tier
+        businessName: Loyalty Tier
+        logicalType: string
+        physicalType: STRING
+        description: Customer loyalty tier.
+        classification: internal
+
+      - name: total_orders
+        businessName: Total Orders
+        logicalType: integer
+        physicalType: BIGINT
+        description: Total number of orders (COUNT of order_id).
+        required: true
+
+      - name: lifetime_spend
+        businessName: Lifetime Spend
+        logicalType: number
+        physicalType: DECIMAL(18,2)
+        description: Total net spend across all orders (SUM of net_amount).
+        required: true
+        quality:
+          - rule: minValue
+            mustBeGreaterThan: 0
+            severity: warning
+            description: Lifetime spend should be positive.
+
+      - name: avg_order_value
+        businessName: Average Order Value
+        logicalType: number
+        physicalType: DOUBLE
+        description: Average net order value (AVG of net_amount, unrounded).
+        required: true
+
+      - name: first_order_date
+        businessName: First Order Date
+        logicalType: date
+        physicalType: DATE
+        description: Date of the customer's first order.
+
+      - name: last_order_date
+        businessName: Last Order Date
+        logicalType: date
+        physicalType: DATE
+        description: Date of the customer's most recent order.
+
+      - name: customer_tenure_days
+        businessName: Customer Tenure (Days)
+        logicalType: integer
+        physicalType: INT
+        description: Days between first and last order (DATEDIFF).
+        required: true
+        quality:
+          - rule: minValue
+            mustBeGreaterThanOrEqualTo: 0
+            severity: warning
+            description: Tenure days should be non-negative.
+
+      - name: spend_rank
+        businessName: Spend Rank
+        logicalType: integer
+        physicalType: BIGINT
+        description: Rank by lifetime_spend descending (RANK window function).
+        required: true
+
+      - name: spend_quartile
+        businessName: Spend Quartile
+        logicalType: integer
+        physicalType: INT
+        description: Spend quartile 1-4 by lifetime_spend (NTILE(4)).
+        required: true
+
+      - name: value_segment
+        businessName: Value Segment
+        logicalType: string
+        physicalType: STRING
+        description: >-
+          Value segment derived from lifetime_spend:
+          VIP (>=10000), High (>=5000), Medium (>=1000), else Low.
+        required: true
+
+quality:
+  - name: valid_lifetime_spend
+    rule: sql
+    query: lifetime_spend > 0
+    severity: warning
+    description: Lifetime spend should be positive.
+  - name: valid_tenure
+    rule: sql
+    query: customer_tenure_days >= 0
+    severity: warning
+    description: Tenure days should be non-negative.
+  - name: unique_customer_grain
+    rule: uniqueness
+    dimension: customer_id
+    severity: error
+    description: customer_id must be unique — it is the grain.
+  - name: valid_value_segment
+    rule: sql
+    query: value_segment IN ('VIP', 'High', 'Medium', 'Low')
+    severity: error
+    description: value_segment must be one of the defined buckets.
+
+lineage:
+  sources:
+    - name: silver_meta_clean_orders
+      catalog: vdm_classic_aerfvt_catalog
+      schema: silver
+      relationship: primary
+      description: Order fact source; aggregated per customer_id.
+    - name: silver_meta_clean_customers
+      catalog: vdm_classic_aerfvt_catalog
+      schema: silver
+      relationship: inner_join
+      joinCondition: orders.customer_id = customers.customer_id
+      description: Customer dimension providing name, email, country, loyalty_tier.
+  transformation: >-
+    CTE aggregates orders JOIN customers by customer_id, then applies
+    RANK/NTILE window functions and a CASE-based value_segment.
+
+slaProperties:
+  - property: refreshFrequency
+    value: on-upstream-change
+    description: Materialized view auto-refreshes on upstream change.
+  - property: retention
+    value: unlimited
+    description: Delta-backed; retention governed by catalog defaults.
+
+team:
+  - role: owner
+    description: Data Engineering — meta_driven_etl pipeline owner.
+support:
+  - channel: '#data-engineering'
+    tool: slack
+    scope: interactive
+
+tags:
+  - gold
+  - customer
+  - segmentation
+  - materialized-view

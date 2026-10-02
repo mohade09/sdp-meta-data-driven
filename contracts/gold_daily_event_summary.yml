@@ -1,0 +1,159 @@
+# ============================================================================
+# DATA CONTRACT — Open Data Contract Standard (ODCS) v3.0.1
+# ============================================================================
+# Gold-layer table: gold_meta_daily_event_summary
+#
+# Source of truth: src/meta_driven_etl/config/gold_tables.yml
+#   (table: daily_event_summary). Produced as a Databricks materialized view
+#   by gold_aggregation.py. Keep in sync with gold_tables.yml.
+# ============================================================================
+
+apiVersion: v3.0.1
+kind: DataContract
+id: gold-daily-event-summary
+name: Daily Event Summary
+version: 1.0.0
+status: active
+domain: product
+dataProduct: engagement-analytics
+tenant: vdm_classic_aerfvt
+
+description:
+  purpose: >-
+    Daily event counts and conversion metrics. One row per
+    (event_date, event_type, device_type).
+  usage: >-
+    Read-only analytical consumption for product/engagement dashboards.
+  limitations: >-
+    Materialized view reflecting upstream silver state at last refresh.
+
+servers:
+  - server: prod
+    type: databricks
+    environment: production
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold
+    format: delta
+  - server: dev
+    type: databricks
+    environment: development
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold_dev
+    format: delta
+
+schema:
+  - name: gold_meta_daily_event_summary
+    physicalName: gold_meta_daily_event_summary
+    physicalType: materialized_view
+    logicalType: object
+    description: Daily event counts and conversion metrics.
+    businessName: Daily Event Summary
+    dataGranularityDescription: One row per (event_date, event_type, device_type).
+    properties:
+
+      - name: event_date
+        businessName: Event Date
+        logicalType: date
+        physicalType: DATE
+        description: Calendar date of the events. Part of the grain.
+        primaryKey: true
+        required: true
+        classification: internal
+
+      - name: event_type
+        businessName: Event Type
+        logicalType: string
+        physicalType: STRING
+        description: Type of event (e.g. page_view, add_to_cart). Part of grain.
+        primaryKey: true
+        required: true
+        classification: internal
+
+      - name: device_type
+        businessName: Device Type
+        logicalType: string
+        physicalType: STRING
+        description: Device category (e.g. mobile, desktop). Part of the grain.
+        primaryKey: true
+        required: true
+        classification: internal
+
+      - name: event_count
+        businessName: Event Count
+        logicalType: integer
+        physicalType: BIGINT
+        description: Total number of events (COUNT of event_id).
+        required: true
+        quality:
+          - rule: minValue
+            mustBeGreaterThan: 0
+            severity: warning
+            description: Daily event count should be positive.
+
+      - name: unique_customers
+        businessName: Unique Customers
+        logicalType: integer
+        physicalType: BIGINT
+        description: Distinct customers who triggered events.
+        required: true
+
+      - name: unique_sessions
+        businessName: Unique Sessions
+        logicalType: integer
+        physicalType: BIGINT
+        description: Distinct sessions.
+        required: true
+
+      - name: conversion_count
+        businessName: Conversion Count
+        logicalType: integer
+        physicalType: BIGINT
+        description: Number of conversion events (SUM of is_conversion flag).
+        required: true
+
+quality:
+  - name: positive_event_count
+    rule: sql
+    query: event_count > 0
+    severity: warning
+    description: Daily event count should be positive.
+  - name: unique_grain
+    rule: uniqueness
+    dimension: [event_date, event_type, device_type]
+    severity: error
+    description: (event_date, event_type, device_type) must be unique.
+
+lineage:
+  sources:
+    - name: silver_meta_clean_events
+      catalog: vdm_classic_aerfvt_catalog
+      schema: silver
+      relationship: primary
+      description: Event fact source; aggregated by date, type, and device.
+  transformation: >-
+    GROUP BY event_date, event_type, device_type over
+    silver_meta_clean_events.
+
+slaProperties:
+  - property: refreshFrequency
+    value: on-upstream-change
+    description: Materialized view auto-refreshes on upstream change.
+  - property: retention
+    value: unlimited
+    description: Delta-backed; retention governed by catalog defaults.
+
+team:
+  - role: owner
+    description: Data Engineering — meta_driven_etl pipeline owner.
+support:
+  - channel: '#data-engineering'
+    tool: slack
+    scope: interactive
+
+tags:
+  - gold
+  - product
+  - events
+  - materialized-view

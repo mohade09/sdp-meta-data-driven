@@ -1,0 +1,164 @@
+# ============================================================================
+# DATA CONTRACT — Open Data Contract Standard (ODCS) v3.0.1
+# ============================================================================
+# Gold-layer table: gold_meta_payment_method_revenue
+#
+# Source of truth: src/meta_driven_etl/config/gold_tables.yml
+#   (table: payment_method_revenue, table_type: sql). Physical object is a
+#   STANDARD Delta table (materialized_view: false), produced by
+#   gold_aggregation.py.
+#
+# NOTE: Defined via raw SQL. Physical types below are INFERRED from the SQL
+# expressions — verify against the deployed table (DESCRIBE) and adjust.
+# Keep in sync with gold_tables.yml; bump `version` on any schema change.
+# ============================================================================
+
+apiVersion: v3.0.1
+kind: DataContract
+id: gold-payment-method-revenue
+name: Payment Method Revenue
+version: 1.0.0
+status: active
+domain: finance
+dataProduct: revenue-analytics
+tenant: vdm_classic_aerfvt
+
+description:
+  purpose: >-
+    Monthly revenue broken down by payment method. One row per
+    (order_year, order_month, payment_method).
+  usage: >-
+    Read-only analytical consumption for payment mix and revenue dashboards.
+  limitations: >-
+    Standard batch table (not a materialized view); recomputed on pipeline run.
+
+servers:
+  - server: prod
+    type: databricks
+    environment: production
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold
+    format: delta
+  - server: dev
+    type: databricks
+    environment: development
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold_dev
+    format: delta
+
+schema:
+  - name: gold_meta_payment_method_revenue
+    physicalName: gold_meta_payment_method_revenue
+    physicalType: table
+    logicalType: object
+    description: Monthly revenue by payment method.
+    businessName: Payment Method Revenue
+    dataGranularityDescription: One row per (order_year, order_month, payment_method).
+    properties:
+
+      - name: order_year
+        businessName: Order Year
+        logicalType: integer
+        physicalType: INT
+        description: Calendar year of the orders. Part of the grain.
+        primaryKey: true
+        required: true
+        classification: internal
+
+      - name: order_month
+        businessName: Order Month
+        logicalType: integer
+        physicalType: INT
+        description: Calendar month (1-12) of the orders. Part of the grain.
+        primaryKey: true
+        required: true
+        classification: internal
+
+      - name: payment_method
+        businessName: Payment Method
+        logicalType: string
+        physicalType: STRING
+        description: Payment method used. Part of the grain.
+        primaryKey: true
+        required: true
+        classification: internal
+
+      - name: order_count
+        businessName: Order Count
+        logicalType: integer
+        physicalType: BIGINT
+        description: Number of orders (COUNT of order_id).
+        required: true
+
+      - name: total_revenue
+        businessName: Total Revenue
+        logicalType: number
+        physicalType: DECIMAL(18,2)
+        description: Total net revenue (SUM of net_amount).
+        required: true
+        quality:
+          - rule: minValue
+            mustBeGreaterThan: 0
+            severity: warning
+            description: Revenue per payment method should be positive.
+
+      - name: avg_order_value
+        businessName: Average Order Value
+        logicalType: number
+        physicalType: DOUBLE
+        description: Average net order value (AVG of net_amount, unrounded).
+        required: true
+
+      - name: total_shipping
+        businessName: Total Shipping
+        logicalType: number
+        physicalType: DECIMAL(18,2)
+        description: Total shipping charges (SUM of shipping_amount).
+        required: true
+
+quality:
+  - name: positive_revenue
+    rule: sql
+    query: total_revenue > 0
+    severity: warning
+    description: Revenue per payment method should be positive.
+  - name: unique_grain
+    rule: uniqueness
+    dimension: [order_year, order_month, payment_method]
+    severity: error
+    description: (order_year, order_month, payment_method) must be unique.
+
+lineage:
+  sources:
+    - name: silver_meta_clean_orders
+      catalog: vdm_classic_aerfvt_catalog
+      schema: silver
+      relationship: primary
+      description: Order fact source; aggregated by month and payment method.
+  transformation: >-
+    GROUP BY order_year, order_month, payment_method over
+    silver_meta_clean_orders.
+
+slaProperties:
+  - property: refreshFrequency
+    value: on-pipeline-run
+    description: Standard table; recomputed each pipeline execution.
+  - property: retention
+    value: unlimited
+    description: Delta-backed; retention governed by catalog defaults.
+
+team:
+  - role: owner
+    description: Data Engineering — meta_driven_etl pipeline owner.
+support:
+  - channel: '#data-engineering'
+    tool: slack
+    scope: interactive
+
+tags:
+  - gold
+  - finance
+  - payments
+  - table

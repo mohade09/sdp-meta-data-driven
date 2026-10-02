@@ -1,0 +1,240 @@
+# ============================================================================
+# DATA CONTRACT — Open Data Contract Standard (ODCS) v3.0.1
+# ============================================================================
+# Gold-layer table: gold_meta_customer_order_summary
+#
+# Source of truth for this contract is the pipeline config:
+#   src/meta_driven_etl/config/gold_tables.yml  (table: customer_order_summary)
+# The physical table is produced as a Databricks materialized view by
+#   src/meta_driven_etl/pipeline/gold_aggregation.py
+#
+# Keep this contract in sync with gold_tables.yml. If the config changes,
+# bump `version` and update the schema/quality sections below.
+# ============================================================================
+
+apiVersion: v3.0.1
+kind: DataContract
+id: gold-customer-order-summary
+name: Customer Order Summary
+version: 1.0.0
+status: active
+domain: sales
+dataProduct: customer-analytics
+tenant: vdm_classic_aerfvt
+
+description:
+  purpose: >-
+    Per-customer order metrics for BI dashboards. One row per customer with
+    lifetime order counts, spend, discount, and first/last order dates.
+    Consumed by BI/dashboard tooling as a denormalized read-optimized view.
+  usage: >-
+    Read-only analytical consumption (dashboards, ad-hoc SQL). Not intended
+    for row-level operational lookups or as a system of record for orders or
+    customers — see the silver sources for those.
+  limitations: >-
+    Refreshed as a Databricks materialized view; values reflect the state of
+    the upstream silver tables at last refresh. Customers with zero orders are
+    absent because the underlying join is an INNER join on orders.
+
+# ----------------------------------------------------------------------------
+# Physical addressing (Unity Catalog)
+# ----------------------------------------------------------------------------
+servers:
+  - server: prod
+    type: databricks
+    environment: production
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold
+    format: delta
+  - server: dev
+    type: databricks
+    environment: development
+    host: fe-vm-vdm-classic-aerfvt.cloud.databricks.com
+    catalog: vdm_classic_aerfvt_catalog
+    schema: gold_dev
+    format: delta
+
+# ----------------------------------------------------------------------------
+# Schema
+# ----------------------------------------------------------------------------
+schema:
+  - name: gold_meta_customer_order_summary
+    physicalName: gold_meta_customer_order_summary
+    physicalType: materialized_view
+    logicalType: object
+    description: Per-customer order metrics for BI dashboards.
+    businessName: Customer Order Summary
+    dataGranularityDescription: One row per customer_id.
+    properties:
+
+      # --- Grain / dimension columns ---
+      - name: customer_id
+        businessName: Customer ID
+        logicalType: string
+        physicalType: STRING
+        description: Unique customer identifier. Grain of this table.
+        primaryKey: true
+        required: true
+        unique: true
+        classification: internal
+
+      - name: full_name
+        businessName: Customer Full Name
+        logicalType: string
+        physicalType: STRING
+        description: Customer full name (from silver_meta_clean_customers).
+        required: false
+        classification: pii
+
+      - name: email
+        businessName: Email Address
+        logicalType: string
+        physicalType: STRING
+        description: Customer email address (from silver_meta_clean_customers).
+        required: false
+        classification: pii
+
+      - name: country
+        businessName: Country
+        logicalType: string
+        physicalType: STRING
+        description: Customer country.
+        required: false
+        classification: internal
+
+      - name: loyalty_tier
+        businessName: Loyalty Tier
+        logicalType: string
+        physicalType: STRING
+        description: Customer loyalty tier (e.g. Bronze/Silver/Gold/Platinum).
+        required: false
+        classification: internal
+
+      # --- Metrics ---
+      - name: total_orders
+        businessName: Total Orders
+        logicalType: integer
+        physicalType: BIGINT
+        description: Total number of orders placed by the customer.
+        required: true
+        quality:
+          - rule: minValue
+            mustBeGreaterThan: 0
+            severity: warning
+            description: Customer should have at least one order.
+
+      - name: total_spend
+        businessName: Total Spend
+        logicalType: number
+        physicalType: DECIMAL(18,2)
+        description: Total spend across all orders (SUM of order total_amount).
+        required: true
+        quality:
+          - rule: minValue
+            mustBeGreaterThanOrEqualTo: 0
+            severity: warning
+            description: Total spend should be non-negative.
+
+      - name: total_discount
+        businessName: Total Discount
+        logicalType: number
+        physicalType: DECIMAL(18,2)
+        description: Total discount received across all orders.
+        required: true
+
+      - name: avg_order_value
+        businessName: Average Order Value
+        logicalType: number
+        physicalType: DECIMAL(10,2)
+        description: Average net order value, rounded to 2 decimal places.
+        required: true
+
+      - name: total_items
+        businessName: Total Items
+        logicalType: integer
+        physicalType: BIGINT
+        description: Total number of items purchased across all orders.
+        required: true
+
+      - name: first_order_date
+        businessName: First Order Date
+        logicalType: date
+        physicalType: DATE
+        description: Date of the customer's first order.
+        required: false
+
+      - name: last_order_date
+        businessName: Last Order Date
+        logicalType: date
+        physicalType: DATE
+        description: Date of the customer's most recent order.
+        required: false
+
+# ----------------------------------------------------------------------------
+# Table-level data quality (mirrors gold_tables.yml expectations)
+# ----------------------------------------------------------------------------
+quality:
+  - name: valid_total_orders
+    rule: sql
+    query: total_orders > 0
+    severity: warning
+    description: Customer should have at least one order.
+  - name: spend_matches_orders
+    rule: sql
+    query: total_spend >= 0
+    severity: warning
+    description: Total spend should be non-negative.
+  - name: unique_customer_grain
+    rule: uniqueness
+    dimension: customer_id
+    severity: error
+    description: customer_id must be unique — it is the grain of the table.
+
+# ----------------------------------------------------------------------------
+# Lineage — upstream silver sources
+# ----------------------------------------------------------------------------
+lineage:
+  sources:
+    - name: silver_meta_clean_orders
+      catalog: vdm_classic_aerfvt_catalog
+      schema: silver
+      relationship: primary
+      description: Order fact source; aggregated per customer_id.
+    - name: silver_meta_clean_customers
+      catalog: vdm_classic_aerfvt_catalog
+      schema: silver
+      relationship: inner_join
+      joinCondition: orders.customer_id = customers.customer_id
+      description: Customer dimension providing name, email, country, loyalty_tier.
+  transformation: >-
+    INNER JOIN silver_meta_clean_orders with silver_meta_clean_customers on
+    customer_id, GROUP BY customer_id, full_name, email, country, loyalty_tier.
+
+# ----------------------------------------------------------------------------
+# Service levels
+# ----------------------------------------------------------------------------
+slaProperties:
+  - property: refreshFrequency
+    value: on-upstream-change
+    description: Materialized view auto-refreshes when upstream silver data changes.
+  - property: retention
+    value: unlimited
+    description: Delta-backed; retention governed by catalog/table defaults.
+
+# ----------------------------------------------------------------------------
+# Ownership & support
+# ----------------------------------------------------------------------------
+team:
+  - role: owner
+    description: Data Engineering — meta_driven_etl pipeline owner.
+support:
+  - channel: '#data-engineering'
+    tool: slack
+    scope: interactive
+
+tags:
+  - gold
+  - customer
+  - bi
+  - materialized-view
