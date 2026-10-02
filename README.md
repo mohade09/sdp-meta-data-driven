@@ -2,6 +2,8 @@
 
 A configuration-driven lakehouse framework for Databricks Lakeflow pipelines. Developers onboard new data sources and transformations by editing YAML config files — no pipeline code changes required.
 
+Gold layer tables are governed by ODCS v3 data contracts, validated in CI.
+
 ## End-to-End Flow
 
 ```
